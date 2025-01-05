@@ -3,6 +3,7 @@ import {
   Controller,
   Delete,
   Get,
+  NotFoundException,
   Param,
   Post,
   Put,
@@ -20,8 +21,17 @@ import {
 
 import { SessionManager } from '../core/abc/manager.abc';
 import { WhatsappSession } from '../core/abc/session.abc';
-import { parseBool } from '../helpers';
-import { GetChatMessagesQuery, GetChatsQuery } from '../structures/chats.dto';
+import {
+  ChatPictureQuery,
+  ChatPictureResponse,
+  ChatsPaginationParams,
+  ChatSummary,
+  GetChatMessageQuery,
+  GetChatMessagesFilter,
+  GetChatMessagesQuery,
+  OverviewPaginationParams,
+  PinMessageRequest,
+} from '../structures/chats.dto';
 import { EditMessageRequest } from '../structures/chatting.dto';
 
 @ApiSecurity('api_key')
@@ -36,9 +46,23 @@ class ChatsController {
   @ApiOperation({ summary: 'Get chats' })
   getChats(
     @WorkingSessionParam session: WhatsappSession,
-    @Query() query: GetChatsQuery,
+    @Query() pagination: ChatsPaginationParams,
   ) {
-    return session.getChats(query);
+    return session.getChats(pagination);
+  }
+
+  @Get('overview')
+  @SessionApiParam
+  @ApiOperation({
+    summary:
+      'Get chats overview. Includes all necessary things to build UI "your chats overview" page - chat id, name, picture, last message. Sorting by last message timestamp',
+  })
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  getChatsOverview(
+    @WorkingSessionParam session: WhatsappSession,
+    @Query() pagination: OverviewPaginationParams,
+  ): Promise<ChatSummary[]> {
+    return session.getChatsOverview(pagination);
   }
 
   @Delete(':chatId')
@@ -52,17 +76,75 @@ class ChatsController {
     return session.deleteChat(chatId);
   }
 
+  @Get(':chatId/picture')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Gets chat picture' })
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async getChatPicture(
+    @WorkingSessionParam session: WhatsappSession,
+    @Param('chatId') chatId: string,
+    @Query() query: ChatPictureQuery,
+  ): Promise<ChatPictureResponse> {
+    const url = await session.getContactProfilePicture(chatId, query.refresh);
+    return { url: url };
+  }
+
   @Get(':chatId/messages')
   @SessionApiParam
   @ApiOperation({ summary: 'Gets messages in the chat' })
   @ChatIdApiParam
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
   getChatMessages(
     @Query() query: GetChatMessagesQuery,
+    @Query() filter: GetChatMessagesFilter,
     @WorkingSessionParam session: WhatsappSession,
     @Param('chatId') chatId: string,
   ) {
-    const downloadMedia = parseBool(query.downloadMedia);
-    return session.getChatMessages(chatId, query.limit, downloadMedia);
+    return session.getChatMessages(chatId, query, filter);
+  }
+
+  @Get(':chatId/messages/:messageId')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Gets message by id' })
+  @ChatIdApiParam
+  async getChatMessage(
+    @Query() query: GetChatMessageQuery,
+    @WorkingSessionParam session: WhatsappSession,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const message = await session.getChatMessage(chatId, messageId, query);
+    if (!message) {
+      throw new NotFoundException('Message not found');
+    }
+    return message;
+  }
+
+  @Post(':chatId/messages/:messageId/pin')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Pins a message in the chat' })
+  @ChatIdApiParam
+  async pinMessage(
+    @WorkingSessionParam session: WhatsappSession,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+    @Body() body: PinMessageRequest,
+  ) {
+    const result = await session.pinMessage(chatId, messageId, body.duration);
+    return { success: result };
+  }
+
+  @Post(':chatId/messages/:messageId/unpin')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Unpins a message in the chat' })
+  @ChatIdApiParam
+  async unpinMessage(
+    @WorkingSessionParam session: WhatsappSession,
+    @Param('chatId') chatId: string,
+    @Param('messageId') messageId: string,
+  ) {
+    const result = await session.unpinMessage(chatId, messageId);
+    return { success: result };
   }
 
   @Delete(':chatId/messages')
@@ -123,6 +205,17 @@ class ChatsController {
     @Param('chatId') chatId: string,
   ) {
     return session.chatsUnarchiveChat(chatId);
+  }
+
+  @Post(':chatId/unread')
+  @SessionApiParam
+  @ChatIdApiParam
+  @ApiOperation({ summary: 'Unread the chat' })
+  unreadChat(
+    @WorkingSessionParam session: WhatsappSession,
+    @Param('chatId') chatId: string,
+  ) {
+    return session.chatsUnreadChat(chatId);
   }
 }
 

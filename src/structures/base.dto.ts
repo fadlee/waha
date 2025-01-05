@@ -1,4 +1,4 @@
-import { IsNotEmpty } from 'class-validator';
+import { IsNotEmpty, IsString } from 'class-validator';
 
 export const WHATSAPP_DEFAULT_SESSION_NAME = 'default';
 
@@ -7,6 +7,7 @@ export const WHATSAPP_DEFAULT_SESSION_NAME = 'default';
  */
 export class SessionQuery {
   @IsNotEmpty()
+  @IsString()
   session: string = WHATSAPP_DEFAULT_SESSION_NAME;
 }
 

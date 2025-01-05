@@ -2,11 +2,14 @@ import {
   BeforeApplicationShutdown,
   UnprocessableEntityException,
 } from '@nestjs/common';
+import { WhatsappConfigService } from '@waha/config.service';
 import { ISessionMeRepository } from '@waha/core/storage/ISessionMeRepository';
+import { ISessionWorkerRepository } from '@waha/core/storage/ISessionWorkerRepository';
 import { WAHAWebhook } from '@waha/structures/webhooks.dto';
 import { waitUntil } from '@waha/utils/promiseTimeout';
 import { VERSION } from '@waha/version';
-import { EventEmitter } from 'events';
+import { PinoLogger } from 'nestjs-pino';
+import { merge, Observable, of } from 'rxjs';
 
 import {
   WAHAEngine,
@@ -22,7 +25,6 @@ import {
 import { ISessionAuthRepository } from '../storage/ISessionAuthRepository';
 import { ISessionConfigRepository } from '../storage/ISessionConfigRepository';
 import { WhatsappSession } from './session.abc';
-import { WebhookConductor } from './webhooks.abc';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const AsyncLock = require('async-lock');
@@ -32,14 +34,32 @@ export abstract class SessionManager implements BeforeApplicationShutdown {
   public sessionAuthRepository: ISessionAuthRepository;
   public sessionConfigRepository: ISessionConfigRepository;
   protected sessionMeRepository: ISessionMeRepository;
-  public events: EventEmitter;
+  protected sessionWorkerRepository: ISessionWorkerRepository;
   private lock: any;
 
   WAIT_STATUS_INTERVAL = 500;
   WAIT_STATUS_TIMEOUT = 5_000;
 
-  protected constructor() {
+  protected constructor(
+    protected config: WhatsappConfigService,
+    protected log: PinoLogger,
+  ) {
     this.lock = new AsyncLock({ maxPending: Infinity });
+    this.log.setContext(SessionManager.name);
+  }
+
+  protected startPredefinedSessions() {
+    const startSessions = this.config.startSessions;
+    startSessions.forEach((sessionName) => {
+      this.withLock(sessionName, async () => {
+        const log = this.log.logger.child({ session: sessionName });
+        log.info(`Restarting PREDEFINED session...`);
+        await this.start(sessionName).catch((error) => {
+          log.error(`Failed to start PREDEFINED session: ${error}`);
+          log.error(error.stack);
+        });
+      });
+    });
   }
 
   public withLock(name: string, fn: () => any) {
@@ -50,7 +70,18 @@ export abstract class SessionManager implements BeforeApplicationShutdown {
 
   protected abstract get EngineClass(): typeof WhatsappSession;
 
-  protected abstract get WebhookConductorClass(): typeof WebhookConductor;
+  public getSessionEvent(session: string, event: WAHAEvents): Observable<any> {
+    return of();
+  }
+
+  public getSessionEvents(
+    session: string,
+    events: WAHAEvents[],
+  ): Observable<any> {
+    return merge(
+      ...events.map((event) => this.getSessionEvent(session, event)),
+    );
+  }
 
   //
   // API Methods
@@ -72,26 +103,24 @@ export abstract class SessionManager implements BeforeApplicationShutdown {
 
   abstract logout(name: string): Promise<void>;
 
+  abstract unpair(name: string): Promise<void>;
+
   abstract getSession(name: string): WhatsappSession;
 
   abstract getSessionInfo(name: string): Promise<SessionDetailedInfo | null>;
 
   abstract getSessions(all: boolean): Promise<SessionInfo[]>;
 
-  protected handleSessionEvent(event: WAHAEvents, session: WhatsappSession) {
-    return (payload: any) => {
-      const me = session.getSessionMeInfo();
-      const data: WAHAWebhook = {
-        event: event,
-        session: session.name,
-        metadata: session.sessionConfig?.metadata,
-        me: me,
-        payload: payload,
-        engine: session.engine,
-        environment: VERSION,
-      };
-      this.events.emit(event, data);
-    };
+  get workerId() {
+    return this.config.workerId;
+  }
+
+  async assign(name: string) {
+    await this.sessionWorkerRepository?.assign(name, this.workerId);
+  }
+
+  async unassign(name: string) {
+    await this.sessionWorkerRepository?.unassign(name, this.workerId);
   }
 
   async getWorkingSession(sessionName: string): Promise<WhatsappSession> {
@@ -124,7 +153,28 @@ export abstract class SessionManager implements BeforeApplicationShutdown {
     return session;
   }
 
-  async beforeApplicationShutdown(signal?: string) {
-    this.events.removeAllListeners();
+  beforeApplicationShutdown(signal?: string) {
+    return;
   }
+}
+export function populateSessionInfo(
+  event: WAHAEvents,
+  session: WhatsappSession,
+) {
+  return (payload: any): WAHAWebhook => {
+    const id = payload._eventId;
+    const data = { ...payload };
+    delete data._eventId;
+    const me = session.getSessionMeInfo();
+    return {
+      id: id,
+      event: event,
+      session: session.name,
+      metadata: session.sessionConfig?.metadata,
+      me: me,
+      payload: data,
+      engine: session.engine,
+      environment: VERSION,
+    };
+  };
 }

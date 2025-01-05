@@ -102,6 +102,11 @@ export class WASessionStatusBody {
 
 export class WAHAWebhook {
   @ApiProperty({
+    example: 'evt_01jcn4pjwwg47bwy2gsey6q5sx',
+  })
+  id: string;
+
+  @ApiProperty({
     example: 'default',
   })
   session: string;
@@ -320,6 +325,20 @@ class WAHAWebhookLabelChatDeleted extends WAHAWebhook {
   payload: LabelChatAssociation;
 }
 
+export class EnginePayload {
+  event: string;
+  data: any;
+}
+
+class WAHAWebhookEngineEvent extends WAHAWebhook {
+  @ApiProperty({
+    description: 'Internal engine event.',
+  })
+  event = WAHAEvents.ENGINE_EVENT;
+
+  payload: EnginePayload;
+}
+
 const WAHA_WEBHOOKS = [
   WAHAWebhookSessionStatus,
   WAHAWebhookMessage,
@@ -341,5 +360,6 @@ const WAHA_WEBHOOKS = [
   WAHAWebhookLabelDeleted,
   WAHAWebhookLabelChatAdded,
   WAHAWebhookLabelChatDeleted,
+  WAHAWebhookEngineEvent,
 ];
 export { WAHA_WEBHOOKS };

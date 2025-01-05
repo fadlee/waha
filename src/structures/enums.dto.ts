@@ -22,7 +22,13 @@ export enum WAHAEvents {
   LABEL_DELETED = 'label.deleted',
   LABEL_CHAT_ADDED = 'label.chat.added',
   LABEL_CHAT_DELETED = 'label.chat.deleted',
+  ENGINE_EVENT = 'engine.event',
 }
+
+// All but no state.change, it's internal one
+export const WAHAEventsWild = Object.values(WAHAEvents).filter(
+  (e) => e !== WAHAEvents.STATE_CHANGE && e !== WAHAEvents.ENGINE_EVENT,
+);
 
 export enum WAHASessionStatus {
   STOPPED = 'STOPPED',
@@ -53,4 +59,5 @@ export enum WAMessageAck {
   READ = 3,
   PLAYED = 4,
 }
+
 export const ACK_UNKNOWN = 'UNKNOWN';

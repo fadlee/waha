@@ -1,5 +1,7 @@
+import { PaginationParams } from '@waha/structures/pagination.dto';
+import { KnexPaginator } from '@waha/utils/Paginator';
 import { Database } from 'better-sqlite3';
-import Knex from 'knex';
+import Knex, { QueryBuilder } from 'knex';
 
 import { Field, Schema } from './Schema';
 
@@ -15,6 +17,8 @@ export class Sqlite3KVRepository<Entity> {
   private readonly columns: Field[];
   private knex: Knex.Knex;
 
+  protected Paginator = KnexPaginator;
+
   constructor(
     db: Database,
     schema: Schema,
@@ -29,8 +33,10 @@ export class Sqlite3KVRepository<Entity> {
     this.knex = Knex({ client: 'better-sqlite3', useNullAsDefault: true });
   }
 
-  getAll() {
-    return this.all(this.select());
+  getAll(pagination?: PaginationParams) {
+    let query = this.select();
+    query = this.pagination(query, pagination);
+    return this.all(query);
   }
 
   getAllByIds(ids: string[]) {
@@ -162,5 +168,10 @@ export class Sqlite3KVRepository<Entity> {
 
   protected parse(row: any) {
     return JSON.parse(row.data);
+  }
+
+  protected pagination(query: any, pagination?: PaginationParams) {
+    const paginator = new this.Paginator(pagination);
+    return paginator.apply(query);
   }
 }

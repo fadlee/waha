@@ -1,7 +1,8 @@
 import { Contact } from '@adiwajshing/baileys';
+import { PaginationParams } from '@waha/structures/pagination.dto';
 
 export interface IContactRepository {
-  getAll(): Promise<Contact[]>;
+  getAll(pagination?: PaginationParams): Promise<Contact[]>;
 
   getById(id: string): Promise<Contact | null>;
 

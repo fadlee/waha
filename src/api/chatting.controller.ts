@@ -1,5 +1,17 @@
-import { Body, Controller, Get, Post, Put, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Put,
+  Query,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
+import { WAHAValidationPipe } from '@waha/nestjs/pipes/WAHAValidationPipe';
+import { GetChatMessagesFilter } from '@waha/structures/chats.dto';
+import { SendButtonsRequest } from '@waha/structures/chatting.buttons.dto';
 
 import { SessionManager } from '../core/abc/manager.abc';
 import {
@@ -8,6 +20,7 @@ import {
   GetMessageQuery,
   MessageContactVcardRequest,
   MessageFileRequest,
+  MessageForwardRequest,
   MessageImageRequest,
   MessageLinkPreviewRequest,
   MessageLocationRequest,
@@ -81,6 +94,25 @@ export class ChattingController {
     return whatsapp.sendVideo(request);
   }
 
+  @Post('/sendButtons')
+  @ApiOperation({
+    summary: 'Send buttons (interactive message)',
+    description: 'Send Buttons',
+  })
+  @UsePipes(new WAHAValidationPipe())
+  async sendButtons(@Body() request: SendButtonsRequest) {
+    const whatsapp = await this.manager.getWorkingSession(request.session);
+    return whatsapp.sendButtons(request);
+  }
+
+  @Post('/forwardMessage')
+  async forwardMessage(
+    @Body() request: MessageForwardRequest,
+  ): Promise<WAMessage> {
+    const whatsapp = await this.manager.getWorkingSession(request.session);
+    return await whatsapp.forwardMessage(request);
+  }
+
   @Post('/sendSeen')
   async sendSeen(@Body() chat: SendSeenRequest) {
     const whatsapp = await this.manager.getWorkingSession(chat.session);
@@ -141,9 +173,13 @@ export class ChattingController {
 
   @Get('/messages')
   @ApiOperation({ summary: 'Get messages in a chat' })
-  async getMessages(@Query() query: GetMessageQuery) {
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async getMessages(
+    @Query() query: GetMessageQuery,
+    @Query() filter: GetChatMessagesFilter,
+  ) {
     const whatsapp = await this.manager.getWorkingSession(query.session);
-    return whatsapp.getMessages(query);
+    return whatsapp.getChatMessages(query.chatId, query, filter);
   }
 
   @Get('/sendText')

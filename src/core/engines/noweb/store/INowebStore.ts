@@ -4,7 +4,10 @@ import {
   Contact,
   proto,
 } from '@adiwajshing/baileys';
+import { GroupMetadata } from '@adiwajshing/baileys/lib/Types/GroupMetadata';
 import { Label } from '@adiwajshing/baileys/lib/Types/Label';
+import { GetChatMessagesFilter } from '@waha/structures/chats.dto';
+import { PaginationParams } from '@waha/structures/pagination.dto';
 
 export interface INowebStore {
   presences: any;
@@ -17,11 +20,17 @@ export interface INowebStore {
 
   loadMessage(jid: string, id: string): Promise<proto.IWebMessageInfo>;
 
-  getMessagesByJid(chatId: string, limit: number): Promise<any>;
+  getMessagesByJid(
+    chatId: string,
+    filter: GetChatMessagesFilter,
+    pagination: PaginationParams,
+  ): Promise<any>;
 
-  getChats(limit?: number, offset?: number): Promise<Chat[]>;
+  getMessageById(chatId: string, messageId: string): Promise<any>;
 
-  getContacts(): Promise<Contact[]>;
+  getChats(pagination: PaginationParams, broadcast: boolean): Promise<Chat[]>;
+
+  getContacts(pagination: PaginationParams): Promise<Contact[]>;
 
   getContactById(jid: string): Promise<Contact>;
 
@@ -32,4 +41,8 @@ export interface INowebStore {
   getChatsByLabelId(labelId: string): Promise<Chat[]>;
 
   getChatLabels(chatId: string): Promise<Label[]>;
+
+  getGroups(pagination: PaginationParams): Promise<GroupMetadata[]>;
+
+  resetGroupsCache(): void;
 }

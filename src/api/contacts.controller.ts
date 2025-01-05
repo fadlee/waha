@@ -1,4 +1,12 @@
-import { Body, Controller, Get, Post, Query } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Post,
+  Query,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 
 import { SessionManager } from '../core/abc/manager.abc';
@@ -7,13 +15,29 @@ import {
   CheckNumberStatusQuery,
   WANumberExistResult,
 } from '../structures/chatting.dto';
-import { ContactQuery, ContactRequest } from '../structures/contacts.dto';
+import {
+  ContactProfilePictureQuery,
+  ContactQuery,
+  ContactRequest,
+  ContactsPaginationParams,
+} from '../structures/contacts.dto';
 
 @ApiSecurity('api_key')
 @Controller('api/contacts')
 @ApiTags('👤 Contacts')
 export class ContactsController {
   constructor(private manager: SessionManager) {}
+
+  @Get('/all')
+  @ApiOperation({ summary: 'Get all contacts' })
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async getAll(
+    @Query() query: SessionQuery,
+    @Query() pagination: ContactsPaginationParams,
+  ) {
+    const whatsapp = await this.manager.getWorkingSession(query.session);
+    return whatsapp.getContacts(pagination);
+  }
 
   @Get('/')
   @ApiOperation({
@@ -24,13 +48,6 @@ export class ContactsController {
   async get(@Query() query: ContactQuery) {
     const whatsapp = await this.manager.getWorkingSession(query.session);
     return whatsapp.getContact(query);
-  }
-
-  @Get('/all')
-  @ApiOperation({ summary: 'Get all contacts' })
-  async getAll(@Query() query: SessionQuery) {
-    const whatsapp = await this.manager.getWorkingSession(query.session);
-    return whatsapp.getContacts();
   }
 
   @Get('/check-exists')
@@ -59,9 +76,14 @@ export class ContactsController {
     description:
       'If privacy settings do not allow to get the picture, the method will return null.',
   })
-  async getProfilePicture(@Query() query: ContactQuery) {
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async getProfilePicture(@Query() query: ContactProfilePictureQuery) {
     const whatsapp = await this.manager.getWorkingSession(query.session);
-    return whatsapp.getContactProfilePicture(query);
+    const url = await whatsapp.getContactProfilePicture(
+      query.contactId,
+      query.refresh,
+    );
+    return { profilePictureURL: url };
   }
 
   @Post('/block')

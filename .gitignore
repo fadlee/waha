@@ -3,6 +3,7 @@
 .yarn
 example.ts
 .*sessions
+sessions
 .secrets
 .minio
 .media

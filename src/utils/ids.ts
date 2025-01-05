@@ -1,10 +1,9 @@
-import { v4 as uuid4 } from 'uuid';
+import { ulid } from 'ulid';
 
 /**
  * Generate prefix uuid (but remove -)
  * @param prefix
  */
 export function generatePrefixedId(prefix: string) {
-  const id = uuid4().replace(/-/g, '');
-  return `${prefix}_${id}`;
+  return `${prefix}_${ulid().toLowerCase()}`;
 }

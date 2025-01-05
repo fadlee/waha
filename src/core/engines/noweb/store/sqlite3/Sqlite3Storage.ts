@@ -2,6 +2,7 @@ import { WAMessage } from '@adiwajshing/baileys';
 import { LabelAssociation } from '@adiwajshing/baileys/lib/Types/LabelAssociation';
 import { ILabelAssociationRepository } from '@waha/core/engines/noweb/store/ILabelAssociationsRepository';
 import { ILabelsRepository } from '@waha/core/engines/noweb/store/ILabelsRepository';
+import { Sqlite3GroupRepository } from '@waha/core/engines/noweb/store/sqlite3/Sqlite3GroupRepository';
 import { Sqlite3LabelAssociationsRepository } from '@waha/core/engines/noweb/store/sqlite3/Sqlite3LabelAssociationsRepository';
 import { Sqlite3LabelsRepository } from '@waha/core/engines/noweb/store/sqlite3/Sqlite3LabelsRepository';
 import { Field, Index, Schema } from '@waha/core/storage/sqlite3/Schema';
@@ -62,6 +63,14 @@ export class Sqlite3Storage extends INowebStorage {
       'CREATE INDEX IF NOT EXISTS chats_conversationTimestamp_index ON chats (conversationTimestamp)',
     );
 
+    // Groups
+    this.db.exec(
+      'CREATE TABLE IF NOT EXISTS groups (id TEXT PRIMARY KEY, data TEXT)',
+    );
+    this.db.exec(
+      'CREATE UNIQUE INDEX IF NOT EXISTS groups_id_index ON groups (id)',
+    );
+
     // Messages
     this.db.exec(
       'CREATE TABLE IF NOT EXISTS messages (jid TEXT, id TEXT, messageTimestamp INTEGER, data TEXT)',
@@ -117,6 +126,10 @@ export class Sqlite3Storage extends INowebStorage {
 
   getChatRepository() {
     return new Sqlite3ChatRepository(this.db, this.getSchema('chats'));
+  }
+
+  getGroupRepository() {
+    return new Sqlite3GroupRepository(this.db, this.getSchema('groups'));
   }
 
   getLabelsRepository(): ILabelsRepository {

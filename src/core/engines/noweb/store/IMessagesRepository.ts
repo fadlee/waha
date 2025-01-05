@@ -1,3 +1,6 @@
+import { GetChatMessagesFilter } from '@waha/structures/chats.dto';
+import { PaginationParams } from '@waha/structures/pagination.dto';
+
 export interface IMessagesRepository {
   deleteAll(): Promise<void>;
 
@@ -5,7 +8,11 @@ export interface IMessagesRepository {
 
   upsertOne(message: any): Promise<void>;
 
-  getAllByJid(jid: string, limit: number): Promise<any[]>;
+  getAllByJid(
+    jid: string,
+    filter: GetChatMessagesFilter,
+    pagination: PaginationParams,
+  ): Promise<any[]>;
 
   getByJidById(jid: string, id: string): Promise<any | null>;
 

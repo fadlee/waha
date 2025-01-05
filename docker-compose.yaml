@@ -4,7 +4,7 @@ services:
     restart: always
     # https://waha.devlike.pro/docs/how-to/engines/#docker-images
     # https://portal.devlike.pro/docker-image
-    image: devlikeapro/waha-plus:latest
+    image: devlikeapro/waha-plus
     # WAHA Core
     # image: devlikeapro/waha:latest
 
@@ -13,7 +13,7 @@ services:
 
     volumes:
       # Store sessions in the .sessions folder (comment it if you're using MongoDB)
-      - './.sessions:/app/.sessions'
+      - './sessions:/app/.sessions'
 
       # Save media files
       # https://waha.devlike.pro/docs/how-to/storages/#save-media-files-between-the-container-restarts
@@ -24,7 +24,7 @@ services:
 
   # NOTE: Only if you're using MongoDB
   # https://waha.devlike.pro/docs/how-to/storages/#sessions---mongodb
-  # Comment this block if you're using MongoDB
+  # Uncomment this block if you're using MongoDB
 #  mongodb:
 #    image: mongo
 #    container_name: mongodb
@@ -32,11 +32,13 @@ services:
 #      - '127.0.0.1:27017:27017/tcp'
 #    volumes:
 #      - mongodb_data:/data/db
-#    restart: always
+#    environment:
+#      - MONGO_INITDB_ROOT_USERNAME=mongouser
+#      - MONGO_INITDB_ROOT_PASSWORD=mongopassword
 
 # NOTE: Only if you're using S3 to save media files
 # https://waha.devlike.pro/docs/how-to/storages/#media---s3
-# Comment this block if you're using AWS S3
+# Uncomment this block if you're using AWS S3
 #  minio:
 #    image: quay.io/minio/minio
 #    container_name: minio

@@ -1,5 +1,6 @@
 import makeWASocket, {
   Browsers,
+  Chat,
   Contact,
   DisconnectReason,
   downloadMediaMessage,
@@ -9,7 +10,9 @@ import makeWASocket, {
   getKeyAuthor,
   getUrlFromDirectPath,
   isJidGroup,
+  isJidNewsletter,
   isJidStatusBroadcast,
+  isJidUser,
   isRealMessage,
   jidNormalizedUser,
   makeCacheableSignalKeyStore,
@@ -17,18 +20,30 @@ import makeWASocket, {
   normalizeMessageContent,
   PresenceData,
   proto,
+  SocketConfig,
   WAMessageContent,
   WAMessageKey,
+  WAMessageUpdate,
 } from '@adiwajshing/baileys';
 import { WACallEvent } from '@adiwajshing/baileys/lib/Types/Call';
-import { Label as NOWEBLabel } from '@adiwajshing/baileys/lib/Types/Label';
-import { LabelAssociationType } from '@adiwajshing/baileys/lib/Types/LabelAssociation';
+import { BaileysEventMap } from '@adiwajshing/baileys/lib/Types/Events';
+import { GroupMetadata } from '@adiwajshing/baileys/lib/Types/GroupMetadata';
+import {
+  Label as NOWEBLabel,
+  LabelActionBody,
+} from '@adiwajshing/baileys/lib/Types/Label';
+import {
+  ChatLabelAssociation,
+  LabelAssociationType,
+} from '@adiwajshing/baileys/lib/Types/LabelAssociation';
+import { MessageUserReceiptUpdate } from '@adiwajshing/baileys/lib/Types/Message';
 import { isLidUser } from '@adiwajshing/baileys/lib/WABinary/jid-utils';
 import { Logger as BaileysLogger } from '@adiwajshing/baileys/node_modules/pino';
 import { UnprocessableEntityException } from '@nestjs/common';
+import { sendButtonMessage } from '@waha/core/engines/noweb/noweb.buttons';
 import { NowebInMemoryStore } from '@waha/core/engines/noweb/store/NowebInMemoryStore';
 import { IMediaEngineProcessor } from '@waha/core/media/IMediaEngineProcessor';
-import { flipObject, parseBool, splitAt } from '@waha/helpers';
+import { flipObject, splitAt } from '@waha/helpers';
 import { PairingCodeResponse } from '@waha/structures/auth.dto';
 import { CallData } from '@waha/structures/calls.dto';
 import {
@@ -37,37 +52,61 @@ import {
   CreateChannelRequest,
   ListChannelsQuery,
 } from '@waha/structures/channels.dto';
-import { GetChatsQuery } from '@waha/structures/chats.dto';
+import {
+  ChatSummary,
+  GetChatMessageQuery,
+  GetChatMessagesFilter,
+  GetChatMessagesQuery,
+  PinDuration,
+} from '@waha/structures/chats.dto';
+import { SendButtonsRequest } from '@waha/structures/chatting.buttons.dto';
 import { ContactQuery, ContactRequest } from '@waha/structures/contacts.dto';
+import { BinaryFile, RemoteFile } from '@waha/structures/files.dto';
 import {
   Label,
   LabelChatAssociation,
+  LabelDTO,
   LabelID,
 } from '@waha/structures/labels.dto';
 import { ReplyToMessage } from '@waha/structures/message.dto';
+import { PaginationParams } from '@waha/structures/pagination.dto';
 import {
+  EnginePayload,
   PollVote,
   PollVotePayload,
   WAMessageAckBody,
 } from '@waha/structures/webhooks.dto';
 import { LoggerBuilder } from '@waha/utils/logging';
-import { waitUntil } from '@waha/utils/promiseTimeout';
+import { sleep, waitUntil } from '@waha/utils/promiseTimeout';
+import { exclude } from '@waha/utils/reactive/ops/exclude';
 import { SingleDelayedJobRunner } from '@waha/utils/SingleDelayedJobRunner';
 import { SinglePeriodicJobRunner } from '@waha/utils/SinglePeriodicJobRunner';
 import * as Buffer from 'buffer';
 import { Agent } from 'https';
 import * as lodash from 'lodash';
-import { toNumber } from 'lodash';
 import * as NodeCache from 'node-cache';
+import {
+  filter,
+  fromEvent,
+  identity,
+  merge,
+  mergeAll,
+  mergeMap,
+  Observable,
+  partition,
+  share,
+  Subject,
+} from 'rxjs';
+import { map } from 'rxjs/operators';
 
 import {
   ChatRequest,
   CheckNumberStatusQuery,
   EditMessageRequest,
-  GetMessageQuery,
   MessageContactVcardRequest,
   MessageDestination,
   MessageFileRequest,
+  MessageForwardRequest,
   MessageImageRequest,
   MessageLinkPreviewRequest,
   MessageLocationRequest,
@@ -111,7 +150,6 @@ import {
   ensureSuffix,
   getChannelInviteLink,
   isNewsletter,
-  WAHAInternalEvent,
   WhatsappSession,
 } from '../../abc/session.abc';
 import {
@@ -125,7 +163,7 @@ import { NowebAuthFactoryCore } from './NowebAuthFactoryCore';
 import { INowebStore } from './store/INowebStore';
 import { NowebPersistentStore } from './store/NowebPersistentStore';
 import { NowebStorageFactoryCore } from './store/NowebStorageFactoryCore';
-import { extractMediaContent } from './utils';
+import { ensureNumber, extractMediaContent } from './utils';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const QRCode = require('qrcode');
@@ -161,13 +199,10 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
 
   private autoRestartJob: SinglePeriodicJobRunner;
   private msgRetryCounterCache: NodeCache;
+  private placeholderResendCache: NodeCache;
   protected engineLogger: BaileysLogger;
 
   private authNOWEBStore: any;
-
-  get listenConnectionEventsFromTheStart() {
-    return true;
-  }
 
   sock: ReturnType<typeof makeWASocket>;
   store: INowebStore;
@@ -181,6 +216,10 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     // external map to store retry counts of messages when decryption/encryption fails
     // keep this out of the socket itself, to prevent a message decryption/encryption loop across socket restarts
     this.msgRetryCounterCache = new NodeCache({
+      stdTTL: 60 * 60, // 1 hour
+      useClones: false,
+    });
+    this.placeholderResendCache = new NodeCache({
       stdTTL: 60 * 60, // 1 hour
       useClones: false,
     });
@@ -209,10 +248,21 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
 
   async start() {
     this.status = WAHASessionStatus.STARTING;
-    await this.buildClient();
+    await this.buildClient().catch((err) => {
+      this.logger.error('Failed to start the client');
+      this.logger.error(err, err.stack);
+      this.status = WAHASessionStatus.FAILED;
+      this.restartClient();
+    });
   }
 
-  getSocketConfig(agent, state): any {
+  async unpair() {
+    this.unpairing = true;
+    this.shouldRestart = false;
+    await this.sock?.logout();
+  }
+
+  getSocketConfig(agent, state): Partial<SocketConfig> {
     const fullSyncEnabled = this.sessionConfig?.noweb?.store?.fullSync || false;
     const browser = fullSyncEnabled
       ? Browsers.ubuntu('Desktop')
@@ -224,11 +274,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return {
       agent: agent,
       fetchAgent: agent,
-      auth: {
-        creds: state.creds,
-        /** caching makes the store faster to send/recv messages */
-        keys: makeCacheableSignalKeyStore(state.keys, this.engineLogger),
-      },
+      auth: state,
       printQRInTerminal: false,
       browser: browser,
       logger: this.engineLogger,
@@ -238,20 +284,30 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       getMessage: (key) => this.getMessage(key),
       syncFullHistory: fullSyncEnabled,
       msgRetryCounterCache: this.msgRetryCounterCache,
+      placeholderResendCache: this.placeholderResendCache,
       markOnlineOnConnect: markOnlineOnConnect,
     };
   }
 
   async makeSocket(): Promise<any> {
     if (!this.authNOWEBStore) {
-      this.authNOWEBStore = await this.authFactory.buildAuth(
+      const store = await this.authFactory.buildAuth(
         this.sessionStore,
         this.name,
       );
+      /** caching makes the store faster to send/recv messages */
+      store.state.keys = makeCacheableSignalKeyStore(
+        store.state.keys,
+        this.engineLogger,
+      );
+      this.authNOWEBStore = store;
     }
     const { state, saveCreds } = this.authNOWEBStore;
     const agent = this.makeAgent();
-    const socketConfig = this.getSocketConfig(agent, state);
+    const socketConfig: SocketConfig = this.getSocketConfig(
+      agent,
+      state,
+    ) as SocketConfig;
     const sock = makeWASocket(socketConfig);
     sock.ev.on('creds.update', saveCreds);
     return sock;
@@ -264,33 +320,33 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return createAgentProxy(this.proxyConfig);
   }
 
-  async connectStore() {
-    this.logger.debug(`Connecting store...`);
-    if (!this.store) {
-      this.logger.debug(`Making a new store...`);
-      const storeEnabled = this.sessionConfig?.noweb?.store?.enabled || false;
-      if (storeEnabled) {
-        this.logger.debug('Using NowebPersistentStore');
-        const storage = this.storageFactory.createStorage(
-          this.sessionStore,
-          this.name,
-        );
-        this.store = new NowebPersistentStore(
-          this.loggerBuilder.child({ name: NowebPersistentStore.name }),
-          storage,
-        );
-        await this.store.init().catch((err) => {
-          this.logger.error(`Failed to initialize storage or store: ${err}`);
-          this.status = WAHASessionStatus.FAILED;
-          this.end();
-          this.store?.close();
-          throw err;
-        });
-      } else {
-        this.logger.debug('Using NowebInMemoryStore');
-        this.store = new NowebInMemoryStore();
-      }
+  private async ensureStore() {
+    if (this.store) {
+      return;
     }
+
+    this.logger.debug(`Making a new store...`);
+    const storeEnabled = this.sessionConfig?.noweb?.store?.enabled || false;
+    if (!storeEnabled) {
+      this.logger.debug('Using NowebInMemoryStore');
+      this.store = new NowebInMemoryStore();
+      return;
+    }
+
+    this.logger.debug('Using NowebPersistentStore');
+    const storage = this.storageFactory.createStorage(
+      this.sessionStore,
+      this.name,
+    );
+    this.store = new NowebPersistentStore(
+      this.loggerBuilder.child({ name: NowebPersistentStore.name }),
+      storage,
+    );
+    await this.store.init();
+  }
+
+  connectStore() {
+    this.logger.debug(`Connecting store...`);
     this.logger.debug(`Binding store to socket...`);
     this.store.bind(this.sock.ev, this.sock);
   }
@@ -305,17 +361,19 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     this.shouldRestart = true;
     // @ts-ignore
     this.sock?.ev?.removeAllListeners();
+
+    await this.ensureStore();
     this.sock = await this.makeSocket();
+
     this.issueMessageUpdateOnEdits();
     this.issuePresenceUpdateOnMessageUpsert();
     if (this.isDebugEnabled()) {
       this.listenEngineEventsInDebugMode();
     }
-    await this.connectStore();
-    if (this.listenConnectionEventsFromTheStart) {
-      this.listenConnectionEvents();
-      this.events.emit(WAHAInternalEvent.ENGINE_START);
-    }
+    this.connectStore();
+    this.listenConnectionEvents();
+    this.subscribeEngineEvents2();
+    this.listenContactsUpdatePictureProfile();
     this.enableAutoRestart();
   }
 
@@ -360,6 +418,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
         );
         return;
       }
+      await this.end();
       await this.start();
     });
   }
@@ -393,8 +452,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
           this.logger.error(
             `Connection closed due to '${lastDisconnect.error}', do not reconnect the session.`,
           );
-          await this.end();
-          this.status = WAHASessionStatus.FAILED;
+          await this.failed();
         }
       }
 
@@ -412,6 +470,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     this.shouldRestart = false;
     this.startDelayedJob.cancel();
     this.autoRestartJob.stop();
+
     if (this.authNOWEBStore && this.status == WAHASessionStatus.WORKING) {
       this.logger.info('Saving creds before stopping...');
       await this.authNOWEBStore.saveCreds().catch((e) => {
@@ -422,10 +481,27 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       this.authNOWEBStore = null;
     }
     this.status = WAHASessionStatus.STOPPED;
-    this.events.removeAllListeners();
+    this.stopEvents();
+
     await this.end();
     await this.store?.close();
-    return;
+  }
+
+  protected async failed() {
+    this.shouldRestart = false;
+    this.startDelayedJob.cancel();
+    this.autoRestartJob.stop();
+
+    // We'll restart the client if it's in the process of unpairing
+    this.status = WAHASessionStatus.FAILED;
+
+    if (this.unpairing) {
+      // Wait for unpairing to complete before ending the socket
+      await sleep(1_000);
+    }
+
+    await this.end();
+    await this.store?.close();
   }
 
   private issueMessageUpdateOnEdits() {
@@ -587,6 +663,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     const message = {
       text: request.text,
       mentions: request.mentions?.map(toJID),
+      linkPreview: this.getLinkPreview(request),
     };
     const options = await this.getMessageOptions(request);
     return this.sock.sendMessage(chatId, message, options);
@@ -660,6 +737,30 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     throw new AvailableInPlusVersion();
   }
 
+  protected async uploadMedia(
+    file: RemoteFile | BinaryFile,
+    type,
+  ): Promise<any> {
+    if (file && ('url' in file || 'data' in file)) {
+      throw new AvailableInPlusVersion('Sending media (image, video, pdf)');
+    }
+    return;
+  }
+
+  async sendButtons(request: SendButtonsRequest) {
+    const chatId = toJID(this.ensureSuffix(request.chatId));
+    const headerImage = await this.uploadMedia(request.headerImage, 'image');
+    return await sendButtonMessage(
+      this.sock,
+      chatId,
+      request.buttons,
+      request.header,
+      headerImage,
+      request.body,
+      request.footer,
+    );
+  }
+
   sendLocation(request: MessageLocationRequest) {
     return this.sock.sendMessage(request.chatId, {
       location: {
@@ -667,6 +768,23 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
         degreesLongitude: request.longitude,
       },
     });
+  }
+
+  async forwardMessage(request: MessageForwardRequest): Promise<WAMessage> {
+    const key = parseMessageIdSerialized(request.messageId);
+    const forwardMessage = await this.store.loadMessage(key.remoteJid, key.id);
+    if (!forwardMessage) {
+      throw new UnprocessableEntityException(
+        `Message with id '${request.messageId}' not found`,
+      );
+    }
+    const chatId = toJID(this.ensureSuffix(request.chatId));
+    const message = {
+      forward: forwardMessage,
+      force: true,
+    };
+    const result = await this.sock.sendMessage(chatId, message, {});
+    return this.toWAMessage(result);
   }
 
   sendLinkPreview(request: MessageLinkPreviewRequest) {
@@ -698,19 +816,17 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return this.sock.sendPresenceUpdate('paused', chatId);
   }
 
-  async getMessages(query: GetMessageQuery) {
-    return this.getChatMessages(query.chatId, query.limit, query.downloadMedia);
-  }
-
   public async getChatMessages(
     chatId: string,
-    limit: number,
-    downloadMedia: boolean,
+    query: GetChatMessagesQuery,
+    filter: GetChatMessagesFilter,
   ) {
-    downloadMedia = parseBool(downloadMedia);
+    const downloadMedia = query.downloadMedia;
+    const pagination = query as PaginationParams;
     const messages = await this.store.getMessagesByJid(
       toJID(chatId),
-      toNumber(limit),
+      filter,
+      pagination,
     );
 
     const promises = [];
@@ -720,6 +836,45 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     let result = await Promise.all(promises);
     result = result.filter(Boolean);
     return result;
+  }
+
+  public async getChatMessage(
+    chatId: string,
+    messageId: string,
+    query: GetChatMessageQuery,
+  ): Promise<null | WAMessage> {
+    const key = parseMessageIdSerialized(messageId, true);
+    const message = await this.store.getMessageById(toJID(chatId), key.id);
+    if (!message) return null;
+    return await this.processIncomingMessage(message, query.downloadMedia);
+  }
+
+  public async pinMessage(
+    chatId: string,
+    messageId: string,
+    duration: PinDuration,
+  ): Promise<boolean> {
+    const jid = toJID(chatId);
+    const key = parseMessageIdSerialized(messageId);
+    await this.sock.sendMessage(jid, {
+      pin: key,
+      type: proto.PinInChat.Type.PIN_FOR_ALL,
+      time: duration,
+    });
+    return true;
+  }
+
+  public async unpinMessage(
+    chatId: string,
+    messageId: string,
+  ): Promise<boolean> {
+    const jid = toJID(chatId);
+    const key = parseMessageIdSerialized(messageId);
+    await this.sock.sendMessage(jid, {
+      pin: key,
+      type: proto.PinInChat.Type.UNPIN_FOR_ALL,
+    });
+    return true;
   }
 
   async setReaction(request: MessageReactionRequest) {
@@ -750,11 +905,45 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
    * Chats methods
    */
 
-  async getChats(query: GetChatsQuery) {
-    const chats = await this.store.getChats(query.limit, query.offset);
+  async getChats(pagination: PaginationParams) {
+    const chats = await this.store.getChats(pagination, true);
     // Remove unreadCount, it's not ready yet
     chats.forEach((chat) => delete chat.unreadCount);
     return chats;
+  }
+
+  public async getChatsOverview(
+    pagination: PaginationParams,
+  ): Promise<ChatSummary[]> {
+    const chats = await this.store.getChats(pagination, false);
+    // Remove unreadCount, it's not ready yet
+    chats.forEach((chat) => delete chat.unreadCount);
+
+    const promises = [];
+    for (const chat of chats) {
+      promises.push(this.fetchChatSummary(chat));
+    }
+    const result = await Promise.all(promises);
+    return result;
+  }
+
+  protected async fetchChatSummary(chat: Chat): Promise<ChatSummary> {
+    const id = toCusFormat(chat.id);
+    const name = chat.name;
+    const picture = await this.getContactProfilePicture(chat.id, false);
+    const messages = await this.getChatMessages(
+      chat.id,
+      { limit: 1, offset: 0, downloadMedia: false },
+      {},
+    );
+    const message = messages.length > 0 ? messages[0] : null;
+    return {
+      id: id,
+      name: name || null,
+      picture: picture,
+      lastMessage: message,
+      _chat: chat,
+    };
   }
 
   protected async chatsPutArchive(
@@ -762,7 +951,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     archive: boolean,
   ): Promise<any> {
     const jid = toJID(chatId);
-    const messages = await this.store.getMessagesByJid(jid, 1);
+    const messages = await this.store.getMessagesByJid(jid, {}, { limit: 1 });
     return await this.sock.chatModify(
       { archive: archive, lastMessages: messages },
       jid,
@@ -777,6 +966,15 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return this.chatsPutArchive(chatId, false);
   }
 
+  public async chatsUnreadChat(chatId: string): Promise<any> {
+    const jid = toJID(chatId);
+    const messages = await this.store.getMessagesByJid(jid, {}, { limit: 1 });
+    return await this.sock.chatModify(
+      { markRead: false, lastMessages: messages },
+      jid,
+    );
+  }
+
   /**
    * Labels methods
    */
@@ -784,6 +982,52 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
   public async getLabels(): Promise<Label[]> {
     const labels = await this.store.getLabels();
     return labels.map(this.toLabel);
+  }
+
+  public async createLabel(label: LabelDTO): Promise<Label> {
+    const labels = await this.store.getLabels();
+    const highestLabelId = lodash.max(
+      labels.map((label) => parseInt(label.id)),
+    );
+    const labelId = highestLabelId ? highestLabelId + 1 : 1;
+    const labelAction: LabelActionBody = {
+      id: labelId.toString(),
+      name: label.name,
+      color: label.color,
+      deleted: false,
+      predefinedId: undefined,
+    };
+    await this.sock.addLabel(undefined, labelAction);
+
+    return {
+      id: labelId.toString(),
+      name: label.name,
+      color: label.color,
+      colorHex: Label.toHex(label.color),
+    };
+  }
+
+  public async updateLabel(label: Label): Promise<Label> {
+    const labelAction: LabelActionBody = {
+      id: label.id,
+      name: label.name,
+      color: label.color,
+      deleted: false,
+      predefinedId: undefined,
+    };
+    await this.sock.addLabel(undefined, labelAction);
+    return label;
+  }
+
+  public async deleteLabel(label: Label): Promise<void> {
+    const labelAction: LabelActionBody = {
+      id: label.id,
+      name: label.name,
+      color: label.color,
+      deleted: true,
+      predefinedId: undefined,
+    };
+    await this.sock.addLabel(undefined, labelAction);
   }
 
   public async getChatsByLabelId(labelId: string) {
@@ -824,6 +1068,18 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     };
   }
 
+  private async toLabelChatAssociation(
+    association: ChatLabelAssociation,
+  ): Promise<LabelChatAssociation> {
+    const labelData = await this.store.getLabelById(association.labelId);
+    const label = labelData ? this.toLabel(labelData) : null;
+    return {
+      labelId: association.labelId,
+      chatId: toCusFormat(association.chatId),
+      label: label,
+    };
+  }
+
   /**
    * Contacts methods
    */
@@ -836,8 +1092,8 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return this.toWAContact(contact);
   }
 
-  async getContacts() {
-    const contacts = await this.store.getContacts();
+  async getContacts(pagination: PaginationParams) {
+    const contacts = await this.store.getContacts(pagination);
     return contacts.map(this.toWAContact);
   }
 
@@ -845,10 +1101,16 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     throw new NotImplementedByEngineError();
   }
 
-  public async getContactProfilePicture(query: ContactQuery) {
-    const contact = this.ensureSuffix(query.contactId);
+  public async fetchContactProfilePicture(id: string) {
+    const contact = this.ensureSuffix(id);
+    if (isJidNewsletter(id)) {
+      return null;
+    }
+    if (isJidStatusBroadcast(id)) {
+      return null;
+    }
     const url = await this.sock.profilePictureUrl(contact, 'image');
-    return { profilePictureURL: url };
+    return url;
   }
 
   public async blockContact(request: ContactRequest) {
@@ -867,12 +1129,28 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return this.sock.groupCreate(request.name, participants);
   }
 
-  public async getGroups() {
-    return await this.sock.groupFetchAllParticipating();
+  public joinGroup(code: string) {
+    return this.sock.groupAcceptInvite(code);
+  }
+
+  public joinInfoGroup(code: string) {
+    return this.sock.groupGetInviteInfo(code);
+  }
+
+  public async getGroups(pagination: PaginationParams) {
+    const groups = await this.store.getGroups(pagination);
+    // return {id: group} mapping for backward compatability
+    return lodash.keyBy(groups, 'id');
+  }
+
+  public async refreshGroups(): Promise<boolean> {
+    this.store.resetGroupsCache();
+    await this.store.getGroups({});
+    return true;
   }
 
   public async getGroup(id) {
-    const groups = await this.sock.groupFetchAllParticipating();
+    const groups = await this.getGroups({});
     return groups[id];
   }
 
@@ -961,38 +1239,54 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
   /**
    * Status methods
    */
-  public sendTextStatus(status: TextStatus) {
+  public async sendTextStatus(status: TextStatus) {
     const message = { text: status.text };
-    const JIDs = status.contacts.map(toJID);
-    this.upsertMeInJIDs(JIDs);
+    const jids = await this.prepareJidsForStatus(status.contacts);
     const options = {
       backgroundColor: status.backgroundColor,
       font: status.font,
-      statusJidList: JIDs,
+      statusJidList: jids,
     };
 
-    return this.sock.sendMessage(BROADCAST_ID, message, options);
+    return await this.sock.sendMessage(BROADCAST_ID, message, options);
   }
 
-  public deleteStatus(request: DeleteStatusRequest) {
+  protected async prepareJidsForStatus(contacts: string[]) {
+    let jids: string[];
+    if (contacts?.length > 0) {
+      jids = contacts.map(toJID);
+    } else {
+      jids = await this.fetchMyContactsJids();
+    }
+    this.upsertMeInJIDs(jids);
+    return jids;
+  }
+
+  protected async fetchMyContactsJids() {
+    const contacts = await this.store.getContacts({});
+    const jids = contacts.map((contact) => contact.id);
+    return jids.filter((jid) => jid.endsWith('@s.whatsapp.net'));
+  }
+
+  public async deleteStatus(request: DeleteStatusRequest) {
     const messageId = request.id;
     const key = parseMessageIdSerialized(messageId, true);
     key.fromMe = true;
     key.remoteJid = BROADCAST_ID;
-    const JIDs = request.contacts.map(toJID);
+    const jids = await this.prepareJidsForStatus(request.contacts);
     const options = {
-      statusJidList: JIDs,
+      statusJidList: jids,
     };
-    return this.sock.sendMessage(BROADCAST_ID, { delete: key }, options);
+    return await this.sock.sendMessage(BROADCAST_ID, { delete: key }, options);
   }
 
-  protected upsertMeInJIDs(JIDs: string[]) {
+  protected upsertMeInJIDs(jids: string[]) {
     if (!this.sock?.authState?.creds?.me) {
       return;
     }
     const myJID = jidNormalizedUser(this.sock.authState.creds.me.id);
-    if (!JIDs.includes(myJID)) {
-      JIDs.push(myJID);
+    if (!jids.includes(myJID)) {
+      jids.push(myJID);
     }
   }
 
@@ -1071,208 +1365,252 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return await this.sock.newsletterAction(id, 'unmute');
   }
 
+  subscribeEngineEvents2() {
+    //
+    // All
+    //
+    const all$ = new Observable<EnginePayload>((subscriber) => {
+      return this.sock.ev.process((events) => {
+        // iterate over keys
+        for (const event in events) {
+          const data = events[event];
+          subscriber.next({ event: event, data: data });
+        }
+      });
+    });
+    this.events2.get(WAHAEvents.ENGINE_EVENT).switch(all$);
+
+    //
+    // Messages
+    //
+    const messagesUpsert$ = fromEvent(this.sock.ev, 'messages.upsert').pipe(
+      map((event: BaileysEventMap['messages.upsert']) => event.messages),
+      mergeAll(),
+    );
+    let [messagesFromMe$, messagesFromOthers$] = partition(
+      messagesUpsert$,
+      isMine,
+    );
+    messagesFromMe$ = messagesFromMe$.pipe(
+      mergeMap((msg) => this.processIncomingMessage(msg, true)),
+      share(), // share it so we don't process twice in message.any
+    );
+    messagesFromOthers$ = messagesFromOthers$.pipe(
+      mergeMap((msg) => this.processIncomingMessage(msg, true)),
+      share(), // share it so we don't process twice in message.any
+    );
+    const messagesFromAll$ = merge(messagesFromMe$, messagesFromOthers$);
+    this.events2.get(WAHAEvents.MESSAGE).switch(messagesFromOthers$);
+    this.events2.get(WAHAEvents.MESSAGE_ANY).switch(messagesFromAll$);
+
+    //
+    // Message Reactions
+    //
+    const messageReactions$ = messagesUpsert$.pipe(
+      map(this.processMessageReaction.bind(this)),
+      filter(Boolean),
+    );
+    this.events2.get(WAHAEvents.MESSAGE_REACTION).switch(messageReactions$);
+
+    //
+    // Message Ack
+    //
+    const messageUpdates$: Observable<WAMessageUpdate> = fromEvent(
+      this.sock.ev,
+      'messages.update',
+    ).pipe(
+      // @ts-ignore
+      mergeAll(),
+    );
+    const messageAckDirect$ = messageUpdates$.pipe(
+      filter(isMine), // ack comes only for MY messages
+      filter(isAckUpdateMessageEvent),
+      map(this.convertMessageUpdateToMessageAck.bind(this)),
+    );
+    const messageReceiptUpdate$: Observable<MessageUserReceiptUpdate> =
+      fromEvent(this.sock.ev, 'message-receipt.update').pipe(
+        // @ts-ignore
+        mergeAll(),
+      );
+
+    const messageAckGroups$ = messageReceiptUpdate$.pipe(
+      filter(isMine), // ack comes only for MY messages
+      map(this.convertMessageReceiptUpdateToMessageAck.bind(this)),
+    );
+    const messageAck$ = merge(messageAckDirect$, messageAckGroups$);
+    this.events2.get(WAHAEvents.MESSAGE_ACK).switch(messageAck$);
+
+    //
+    // Other
+    //
+    this.events2
+      .get(WAHAEvents.STATE_CHANGE)
+      .switch(fromEvent(this.sock.ev, 'connection.update'));
+    this.events2.get(WAHAEvents.GROUP_JOIN).switch(
+      // @ts-ignore
+      fromEvent<GroupMetadata[]>(this.sock.ev, 'groups.upsert').pipe(
+        mergeAll(),
+      ),
+    );
+    this.events2
+      .get(WAHAEvents.PRESENCE_UPDATE)
+      .switch(
+        fromEvent(this.sock.ev, 'presence.update').pipe(
+          map((data: any) => this.toWahaPresences(data.id, data.presences)),
+        ),
+      );
+
+    //
+    // Poll votes
+    //
+    this.events2
+      .get(WAHAEvents.POLL_VOTE)
+      .switch(
+        messageUpdates$.pipe(
+          mergeMap(this.handleMessagesUpdatePollVote.bind(this)),
+          filter(Boolean),
+        ),
+      );
+    this.events2
+      .get(WAHAEvents.POLL_VOTE_FAILED)
+      .switch(
+        messagesUpsert$.pipe(
+          mergeMap(this.handleMessageUpsertPollVoteFailed.bind(this)),
+          filter(Boolean),
+        ),
+      );
+
+    //
+    // Calls
+    //
+    // @ts-ignore
+    const calls$: Observable<WACallEvent[]> = fromEvent(this.sock.ev, 'call');
+    const call$ = calls$.pipe(mergeMap(identity));
+    this.events2.get(WAHAEvents.CALL_RECEIVED).switch(
+      call$.pipe(
+        filter((call: WACallEvent) => call.status === 'offer'),
+        map(this.toCallData.bind(this)),
+      ),
+    );
+    this.events2.get(WAHAEvents.CALL_ACCEPTED).switch(
+      call$.pipe(
+        filter((call: WACallEvent) => call.status === 'accept'),
+        map(this.toCallData.bind(this)),
+      ),
+    );
+    this.events2.get(WAHAEvents.CALL_REJECTED).switch(
+      calls$.pipe(
+        // Filter out if there's any "accept" events.
+        // Meaning it's been accepted on one device, but rejected on another
+        exclude((calls) => calls.some((call) => call.status === 'accept')),
+        mergeAll(),
+        filter((call: WACallEvent) => call.status === 'reject'),
+        // We get two "reject" events, one with null isGroup property, ignore it
+        exclude((call: WACallEvent) => call.isGroup == null),
+        map(this.toCallData.bind(this)),
+      ),
+    );
+
+    //
+    // Labels
+    //
+    // @ts-ignore
+    const labelsEdit$: Observable<NOWEBLabel> = fromEvent(
+      this.sock.ev,
+      'labels.edit',
+    );
+    this.events2.get(WAHAEvents.LABEL_UPSERT).switch(
+      labelsEdit$.pipe(
+        exclude((data: NOWEBLabel) => data.deleted),
+        map(this.toLabel.bind(this)),
+      ),
+    );
+    this.events2.get(WAHAEvents.LABEL_DELETED).switch(
+      labelsEdit$.pipe(
+        filter((data: NOWEBLabel) => data.deleted),
+        map(this.toLabel.bind(this)),
+      ),
+    );
+    const labelsAssociation$ = fromEvent(this.sock.ev, 'labels.association');
+    const labelsAssociationAdd$: Observable<ChatLabelAssociation> =
+      labelsAssociation$.pipe(
+        filter(({ type }: any) => type === 'add'),
+        map((data) => data.association),
+        filter(
+          (association: any) => association.type === LabelAssociationType.Chat,
+        ),
+      );
+
+    const labelsAssociationRemove$: Observable<ChatLabelAssociation> =
+      labelsAssociation$.pipe(
+        filter(({ type }: any) => type === 'remove'),
+        map((data) => data.association),
+        filter(
+          (association: any) => association.type === LabelAssociationType.Chat,
+        ),
+      );
+    this.events2
+      .get(WAHAEvents.LABEL_CHAT_ADDED)
+      .switch(
+        labelsAssociationAdd$.pipe(
+          mergeMap(this.toLabelChatAssociation.bind(this)),
+        ),
+      );
+    this.events2
+      .get(WAHAEvents.LABEL_CHAT_DELETED)
+      .switch(
+        labelsAssociationRemove$.pipe(
+          mergeMap(this.toLabelChatAssociation.bind(this)),
+        ),
+      );
+  }
+
+  protected listenContactsUpdatePictureProfile() {
+    this.sock.ev.on('contacts.update', async (updates) => {
+      for (const update of updates) {
+        if (update.imgUrl !== 'changed') {
+          continue;
+        }
+
+        this.logger.debug({ jid: update.id }, 'Profile picture updated');
+        const url = await this.refreshProfilePicture(update.id);
+        if (isJidUser(update.id)) {
+          // update 123@c.us and 123 profiles as well
+          const cus = toCusFormat(update.id);
+          this.profilePictures.set(cus, url);
+          const phone = update.id.split('@')[0];
+          this.profilePictures.set(phone, url);
+        }
+      }
+    });
+  }
+
   /**
    * END - Methods for API
    */
 
-  subscribeEngineEvent(event, handler): boolean {
-    switch (event) {
-      case WAHAEvents.MESSAGE:
-        this.sock.ev.on('messages.upsert', ({ messages }) => {
-          this.handleIncomingMessages(messages, handler, false);
-        });
-        return true;
-      case WAHAEvents.MESSAGE_REACTION:
-        this.sock.ev.on('messages.upsert', ({ messages }) => {
-          const reactions = this.processMessageReaction(messages);
-          reactions.map(handler);
-        });
-        return true;
-      case WAHAEvents.MESSAGE_ANY:
-        this.sock.ev.on('messages.upsert', ({ messages }) =>
-          this.handleIncomingMessages(messages, handler, true),
-        );
-        return true;
-      case WAHAEvents.MESSAGE_ACK: // Direct message ack
-        this.sock.ev.on('messages.update', (events) => {
-          events
-            .filter(isMine)
-            .filter(isAckUpdateMessageEvent)
-            .map(this.convertMessageUpdateToMessageAck)
-            .forEach(handler);
-        });
-        // Group message ack
-        this.sock.ev.on('message-receipt.update', (events) => {
-          events
-            .filter(isMine)
-            .map(this.convertMessageReceiptUpdateToMessageAck)
-            .forEach(handler);
-        });
-        return true;
-      case WAHAEvents.STATE_CHANGE:
-        this.sock.ev.on('connection.update', handler);
-        return true;
-      case WAHAEvents.GROUP_JOIN:
-        this.sock.ev.on('groups.upsert', handler);
-        return true;
-      case WAHAEvents.PRESENCE_UPDATE:
-        this.sock.ev.on('presence.update', (data) =>
-          handler(this.toWahaPresences(data.id, data.presences)),
-        );
-        return true;
-      case WAHAEvents.POLL_VOTE:
-        this.sock.ev.on('messages.update', (events) => {
-          events.forEach((event) =>
-            this.handleMessagesUpdatePollVote(event, handler),
-          );
-        });
-        return true;
-      case WAHAEvents.POLL_VOTE_FAILED:
-        this.sock.ev.on('messages.upsert', ({ messages }) => {
-          messages.forEach((message) =>
-            this.handleMessageUpsertPollVoteFailed(message, handler),
-          );
-        });
-        return true;
-      case WAHAEvents.CALL_RECEIVED:
-        this.sock.ev.on('call', (calls: WACallEvent[]) => {
-          calls = lodash.filter(calls, { status: 'offer' });
-          for (const call of calls) {
-            const body = this.toCallData(call);
-            handler(body);
-          }
-        });
-        return true;
-      case WAHAEvents.CALL_ACCEPTED:
-        this.sock.ev.on('call', (calls: WACallEvent[]) => {
-          calls = lodash.filter(calls, { status: 'accept' });
-          for (const call of calls) {
-            const body = this.toCallData(call);
-            handler(body);
-          }
-        });
-        return true;
-      case WAHAEvents.CALL_REJECTED:
-        this.sock.ev.on('call', (calls: WACallEvent[]) => {
-          const acceptCalls = lodash.filter(calls, { status: 'accept' });
-          if (acceptCalls.length > 0) {
-            // We got two events when accepting calls - reject and accept
-            // Like for each device
-            // So if we see accepted call - ignore rejected
-            return;
-          }
+  private processMessageReaction(message): WAMessageReaction | null {
+    if (!message) return null;
+    if (!message.message) return null;
+    if (!message.message.reactionMessage) return null;
 
-          calls = lodash.filter(calls, { status: 'reject' });
-          for (const call of calls) {
-            const body = this.toCallData(call);
-            if (body.isGroup == null) {
-              // We get two "reject" events, one with null property, ignore it
-              return;
-            }
-            handler(body);
-          }
-        });
-        return true;
-      case WAHAEvents.LABEL_UPSERT:
-        this.sock.ev.on('labels.edit', (data: NOWEBLabel) => {
-          if (data.deleted) {
-            return;
-          }
-          const body = this.toLabel(data);
-          handler(body);
-        });
-        return true;
-      case WAHAEvents.LABEL_DELETED:
-        this.sock.ev.on('labels.edit', (data: NOWEBLabel) => {
-          if (!data.deleted) {
-            return;
-          }
-          const body = this.toLabel(data);
-          handler(body);
-        });
-        return true;
-      case WAHAEvents.LABEL_CHAT_ADDED:
-        this.sock.ev.on('labels.association', async ({ association, type }) => {
-          if (type !== 'add') {
-            return;
-          }
-          if (association.type !== LabelAssociationType.Chat) {
-            return;
-          }
-          const labelData = await this.store.getLabelById(association.labelId);
-          const label = labelData ? this.toLabel(labelData) : null;
-          const body: LabelChatAssociation = {
-            labelId: association.labelId,
-            chatId: toCusFormat(association.chatId),
-            label: label,
-          };
-          handler(body);
-        });
-        return true;
-      case WAHAEvents.LABEL_CHAT_DELETED:
-        this.sock.ev.on('labels.association', async ({ association, type }) => {
-          if (type !== 'remove') {
-            return;
-          }
-          if (association.type !== LabelAssociationType.Chat) {
-            return;
-          }
-          const labelData = await this.store.getLabelById(association.labelId);
-          const label = labelData ? this.toLabel(labelData) : null;
-          const body: LabelChatAssociation = {
-            labelId: association.labelId,
-            chatId: toCusFormat(association.chatId),
-            label: label,
-          };
-          handler(body);
-        });
-        return true;
-      default:
-        return false;
-    }
-  }
-
-  private handleIncomingMessages(messages, handler, includeFromMe) {
-    for (const message of messages) {
-      // Do not include my messages
-      if (!includeFromMe && message.key.fromMe) {
-        continue;
-      }
-      this.processIncomingMessage(message).then((msg) => {
-        if (!msg) {
-          return;
-        }
-        handler(msg);
-      });
-    }
-  }
-
-  private processMessageReaction(messages: any[]): WAMessageReaction[] {
-    const reactions = [];
-    for (const message of messages) {
-      if (!message) return [];
-      if (!message.message) return [];
-      if (!message.message.reactionMessage) return [];
-
-      const id = buildMessageId(message.key);
-      const fromToParticipant = getFromToParticipant(message);
-      const reactionMessage = message.message.reactionMessage;
-      const messageId = buildMessageId(reactionMessage.key);
-      const reaction: WAMessageReaction = {
-        id: id,
-        timestamp: message.messageTimestamp,
-        from: toCusFormat(fromToParticipant.from),
-        fromMe: message.key.fromMe,
-        to: toCusFormat(fromToParticipant.to),
-        participant: toCusFormat(fromToParticipant.participant),
-        reaction: {
-          text: reactionMessage.text,
-          messageId: messageId,
-        },
-      };
-      reactions.push(reaction);
-    }
-    return reactions;
+    const id = buildMessageId(message.key);
+    const fromToParticipant = getFromToParticipant(message);
+    const reactionMessage = message.message.reactionMessage;
+    const messageId = buildMessageId(reactionMessage.key);
+    const reaction: WAMessageReaction = {
+      id: id,
+      timestamp: ensureNumber(message.messageTimestamp),
+      from: toCusFormat(fromToParticipant.from),
+      fromMe: message.key.fromMe,
+      to: toCusFormat(fromToParticipant.to),
+      participant: toCusFormat(fromToParticipant.participant),
+      reaction: {
+        text: reactionMessage.text,
+        messageId: messageId,
+      },
+    };
+    return reaction;
   }
 
   private async processIncomingMessage(message, downloadMedia = true) {
@@ -1311,7 +1649,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     const ack = message.ack || message.status - 1;
     return Promise.resolve({
       id: id,
-      timestamp: message.messageTimestamp,
+      timestamp: ensureNumber(message.messageTimestamp),
       from: toCusFormat(fromToParticipant.from),
       fromMe: message.key.fromMe,
       body: body,
@@ -1348,6 +1686,10 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       // @ts-ignore - AudioMessage doesn't have caption field
       body = mediaContent?.caption;
     }
+    // Response for buttons
+    if (!body) {
+      body = message.templateButtonReplyMessage?.selectedDisplayText;
+    }
     return body;
   }
 
@@ -1358,6 +1700,9 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       return null;
     }
     const quotedMessage = contextInfo.quotedMessage;
+    if (!quotedMessage) {
+      return null;
+    }
     const body = this.extractBody(quotedMessage);
     return {
       id: contextInfo.stanzaId,
@@ -1417,7 +1762,7 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return body;
   }
 
-  protected async handleMessagesUpdatePollVote(event, handler) {
+  protected async handleMessagesUpdatePollVote(event) {
     const { key, update } = event;
     const pollUpdates = update?.pollUpdates;
     if (!pollUpdates) {
@@ -1448,17 +1793,17 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       const pollVote: PollVote = {
         ...voteDestination,
         selectedOptions: selectedOptions,
-        timestamp: pollUpdate.senderTimestampMs,
+        timestamp: ensureNumber(pollUpdate.senderTimestampMs),
       };
       const payload: PollVotePayload = {
         vote: pollVote,
         poll: getDestination(pollCreationMessageKey),
       };
-      handler(payload);
+      return payload;
     }
   }
 
-  protected async handleMessageUpsertPollVoteFailed(message, handler) {
+  protected async handleMessageUpsertPollVoteFailed(message) {
     const pollUpdateMessage = message.message?.pollUpdateMessage;
     if (!pollUpdateMessage) {
       return;
@@ -1480,13 +1825,13 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
       // https://github.com/WhiskeySockets/Baileys/pull/348
       // Or without toNumber() - it depends on the PR above
       // timestamp: pollUpdateMessage.senderTimestampMs.toNumber()
-      timestamp: message.messageTimestamp,
+      timestamp: ensureNumber(message.messageTimestamp),
     };
     const payload: PollVotePayload = {
       vote: pollVote,
       poll: getDestination(pollCreationMessageKey),
     };
-    handler(payload);
+    return payload;
   }
 
   private toCallData(call: WACallEvent): CallData {
@@ -1542,6 +1887,22 @@ export class WhatsappSessionNoWebCore extends WhatsappSession {
     return {
       quoted: quoted,
     };
+  }
+
+  protected getLinkPreview(request): any {
+    // NOWEB works this way
+    // If it's undefined - it'll generate it
+    // If it's false - it will not generate it
+    let linkPreview: boolean | undefined;
+    switch (request.linkPreview) {
+      case false:
+        linkPreview = false;
+        break;
+      case true:
+      default:
+        linkPreview = undefined;
+    }
+    return linkPreview;
   }
 }
 
@@ -1642,6 +2003,8 @@ function toCusFormat(remoteJid) {
   return ensureSuffix(number);
 }
 
+export const ALL_JID = 'all@s.whatsapp.net';
+
 /**
  * Convert from 11111111111@c.us to 11111111111@s.whatsapp.net
  * @param chatId
@@ -1665,9 +2028,13 @@ export function toJID(chatId) {
  * {id: "AAA", remoteJid: "11111111111@s.whatsapp.net", "fromMe": false}
  * false_11111111111@c.us_AA
  */
-function buildMessageId({ id, remoteJid, fromMe }) {
+function buildMessageId({ id, remoteJid, fromMe, participant }: WAMessageKey) {
   const chatId = toCusFormat(remoteJid);
-  return `${fromMe || false}_${chatId}_${id}`;
+  const parts = [fromMe || false, chatId, id];
+  if (participant) {
+    parts.push(toCusFormat(participant));
+  }
+  return parts.join('_');
 }
 
 /**
@@ -1675,22 +2042,31 @@ function buildMessageId({ id, remoteJid, fromMe }) {
  * false_11111111111@c.us_AAA
  * {id: "AAA", remoteJid: "11111111111@s.whatsapp.net", "fromMe": false}
  */
-function parseMessageIdSerialized(messageId: string, soft: boolean = false) {
+function parseMessageIdSerialized(
+  messageId: string,
+  soft: boolean = false,
+): WAMessageKey {
   if (!messageId.includes('_') && soft) {
     return { id: messageId };
   }
 
   const parts = messageId.split('_');
-  if (parts.length != 3) {
+  if (parts.length != 3 && parts.length != 4) {
     throw new Error(
-      'Message id be in format false_11111111111@c.us_AAAAAAAAAAAAAAAAAAAA',
+      'Message id be in format false_11111111111@c.us_AAAAAAAAAAAAAAAAAAAA[_participant]',
     );
   }
   const fromMe = parts[0] == 'true';
   const chatId = parts[1];
   const remoteJid = toJID(chatId);
   const id = parts[2];
-  return { fromMe: fromMe, id: id, remoteJid: remoteJid };
+  const participant = parts[3] ? toJID(parts[3]) : undefined;
+  return {
+    fromMe: fromMe,
+    id: id,
+    remoteJid: remoteJid,
+    participant: participant,
+  };
 }
 
 function getId(object) {

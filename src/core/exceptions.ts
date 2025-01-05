@@ -6,16 +6,16 @@ export class NotImplementedByEngineError extends UnprocessableEntityException {
   constructor(msg = '') {
     let error = 'The method is not implemented by the engine.';
     if (msg) {
-      error += ` ${msg}`;
+      error = `${msg} ${error}`;
     }
     super(error);
   }
 }
 
 export class AvailableInPlusVersion extends UnprocessableEntityException {
-  constructor() {
+  constructor(feature: string = 'The feature') {
     super(
-      `The feature is available only in Plus version. Check this out: ${DOCS_URL}`,
+      `${feature} is available only in Plus version. Check this out: ${DOCS_URL}`,
     );
   }
 }

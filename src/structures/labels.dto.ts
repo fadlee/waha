@@ -1,5 +1,7 @@
+import { UnprocessableEntityException } from '@nestjs/common';
 import { ApiProperty } from '@nestjs/swagger';
 import { ChatIdProperty } from '@waha/structures/properties.dto';
+import { IsHexColor, IsNumber, IsOptional, IsString } from 'class-validator';
 
 const Colors = [
   '#ff9485',
@@ -24,6 +26,65 @@ const Colors = [
   '#9368cf',
 ];
 
+export class LabelBody {
+  @ApiProperty({
+    example: 'Lead',
+    description: 'Label name',
+  })
+  @IsString()
+  name: string;
+
+  @ApiProperty({
+    example: '#ff9485',
+    description: 'Color in hex',
+  })
+  @IsHexColor()
+  @IsOptional()
+  colorHex?: string;
+
+  @ApiProperty({
+    example: null,
+    description: 'Color number, not hex',
+  })
+  @IsNumber()
+  @IsOptional()
+  color?: number;
+
+  toDTO(): LabelDTO {
+    if (this.color != null && this.colorHex != null) {
+      throw new UnprocessableEntityException(
+        "Use either 'color' or 'colorHex'",
+      );
+    }
+
+    if (this.color == null && this.colorHex == null) {
+      throw new UnprocessableEntityException(
+        "'color' or 'colorHex' is required",
+      );
+    }
+
+    if (this.colorHex) {
+      const color = Colors.indexOf(this.colorHex);
+      if (color == -1) {
+        throw new UnprocessableEntityException(
+          "Invalid 'colorHex'. Possible values: " + Colors.join(', '),
+        );
+      }
+      this.color = color;
+    }
+
+    return {
+      name: this.name,
+      color: this.color,
+    };
+  }
+}
+
+export class LabelDTO {
+  name: string;
+  color: number;
+}
+
 export class Label {
   @ApiProperty({
     example: '1',
@@ -39,7 +100,7 @@ export class Label {
 
   @ApiProperty({
     example: 0,
-    description: 'Internal color number, not hex',
+    description: 'Color number, not hex',
   })
   color: number;
 

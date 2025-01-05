@@ -14,10 +14,10 @@ import {
 import { SessionManager } from '@waha/core/abc/manager.abc';
 import { WebsocketHeartbeatJob } from '@waha/nestjs/ws/WebsocketHeartbeatJob';
 import { WebSocket } from '@waha/nestjs/ws/ws';
-import { WAHAEvents } from '@waha/structures/enums.dto';
+import { WAHAEvents, WAHAEventsWild } from '@waha/structures/enums.dto';
+import { EventWildUnmask } from '@waha/utils/events';
 import { generatePrefixedId } from '@waha/utils/ids';
 import { IncomingMessage } from 'http';
-import * as lodash from 'lodash';
 import * as url from 'url';
 import { Server } from 'ws';
 
@@ -37,11 +37,9 @@ export class WebsocketGatewayCore
   @WebSocketServer()
   server: Server;
 
-  private listeners: Map<WebSocket, { session: string; events: string[] }> =
-    new Map();
-
   private readonly logger: LoggerService;
   private heartbeat: WebsocketHeartbeatJob;
+  private eventUnmask = new EventWildUnmask(WAHAEvents, WAHAEventsWild);
 
   constructor(private manager: SessionManager) {
     this.logger = new Logger('WebsocketGateway');
@@ -56,49 +54,39 @@ export class WebsocketGatewayCore
     const id = generatePrefixedId('wsc');
     socket.id = id;
     this.logger.debug(`New client connected: ${request.url}`);
-    const params = this.getParams(id, request, socket);
-    if (!params) {
-      return;
-    }
-    const { session, events } = params;
+    const params = this.getParams(request);
+    const session: string = params.session;
+    const events: WAHAEvents[] = params.events;
     this.logger.debug(
       `Client connected to session: '${session}', events: ${events}, ${id}`,
     );
-    this.listeners.set(socket, { session, events });
+
+    const sub = this.manager
+      .getSessionEvents(session, events)
+      .subscribe((data) => {
+        this.logger.debug(`Sending data to client, event.id: ${data.id}`, data);
+        socket.send(JSON.stringify(data));
+      });
+    socket.on('close', () => {
+      this.logger.debug(`Client disconnected - ${socket.id}`);
+      sub.unsubscribe();
+    });
   }
 
-  private getParams(id: string, request: IncomingMessage, socket: WebSocket) {
+  private getParams(request: IncomingMessage) {
     const query = url.parse(request.url, true).query;
     const session = (query.session as string) || '*';
-    if (session !== '*') {
-      this.logger.warn(
-        `Only connecting to all sessions is allowed for now, use session=*, ${id}`,
-      );
-      const error =
-        'Only connecting to all sessions is allowed for now, use session=*';
-      socket.close(4001, JSON.stringify({ error }));
-      return null;
+    let paramsEvents = (query.events as string[]) || '*';
+    // if params events string - split by ","
+    if (typeof paramsEvents === 'string') {
+      paramsEvents = paramsEvents.split(',');
     }
-
-    const events = ((query.events as string) || '*').split(',');
-    if (
-      !lodash.isEqual(events, ['*']) &&
-      !lodash.isEqual(events, [WAHAEvents.SESSION_STATUS])
-    ) {
-      this.logger.warn(
-        `Only \'session.status\' event is allowed for now, use events=session.status or events=*, ${id}`,
-      );
-      const error =
-        "Only 'session.status' event is allowed for now, use events=session.status or events=*";
-      socket.close(4001, JSON.stringify({ error }));
-      return null;
-    }
+    const events = this.eventUnmask.unmask(paramsEvents);
     return { session, events };
   }
 
   handleDisconnect(socket: WebSocket): any {
     this.logger.debug(`Client disconnected - ${socket.id}`);
-    this.listeners.delete(socket);
   }
 
   async beforeApplicationShutdown(signal?: string) {
@@ -118,24 +106,9 @@ export class WebsocketGatewayCore
 
   afterInit(server: Server) {
     this.logger.debug('Websocket server initialized');
-    this.manager.events.on(
-      WAHAEvents.SESSION_STATUS,
-      this.sendToAll.bind(this),
-    );
-    this.logger.debug('Subscribed to manager events');
 
     this.logger.debug('Starting heartbeat service...');
     this.heartbeat.start(server);
     this.logger.debug('Heartbeat service started');
-  }
-
-  sendToAll(data: any) {
-    this.listeners.forEach((options, client) => {
-      if (options.events.length === 0) {
-        return;
-      }
-      this.logger.debug('Sending data to client', data);
-      client.send(JSON.stringify(data));
-    });
   }
 }

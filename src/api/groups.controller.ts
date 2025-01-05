@@ -6,6 +6,9 @@ import {
   Param,
   Post,
   Put,
+  Query,
+  UsePipes,
+  ValidationPipe,
 } from '@nestjs/common';
 import { ApiOperation, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { GroupIdApiParam } from '@waha/nestjs/params/ChatIdApiParam';
@@ -19,6 +22,9 @@ import { WhatsappSession } from '../core/abc/session.abc';
 import {
   CreateGroupRequest,
   DescriptionRequest,
+  GroupsPaginationParams,
+  JoinGroupRequest,
+  JoinGroupResponse,
   ParticipantsRequest,
   SettingsSecurityChangeInfo,
   SubjectRequest,
@@ -40,11 +46,48 @@ export class GroupsController {
     return session.createGroup(request);
   }
 
+  @Get('join-info')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Get info about the group before joining.' })
+  async joinInfoGroup(
+    @WorkingSessionParam session: WhatsappSession,
+    @Query() query: JoinGroupRequest,
+  ): Promise<any> {
+    // https://chat.whatsapp.com/123 => 123
+    const code = query.code.split('/').pop();
+    return session.joinInfoGroup(code);
+  }
+
+  @Post('join')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Join group via code' })
+  async joinGroup(
+    @WorkingSessionParam session: WhatsappSession,
+    @Body() request: JoinGroupRequest,
+  ): Promise<JoinGroupResponse> {
+    // https://chat.whatsapp.com/123 => 123
+    const code = request.code.split('/').pop();
+    const id = await session.joinGroup(code);
+    return { id: id };
+  }
+
   @Get('')
   @SessionApiParam
   @ApiOperation({ summary: 'Get all groups.' })
-  getGroups(@WorkingSessionParam session: WhatsappSession) {
-    return session.getGroups();
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  getGroups(
+    @WorkingSessionParam session: WhatsappSession,
+    @Query() pagination: GroupsPaginationParams,
+  ) {
+    return session.getGroups(pagination);
+  }
+
+  @Post('refresh')
+  @SessionApiParam
+  @ApiOperation({ summary: 'Refresh groups from the server.' })
+  @UsePipes(new ValidationPipe({ transform: true, whitelist: true }))
+  async refreshGroups(@WorkingSessionParam session: WhatsappSession) {
+    return { success: await session.refreshGroups() };
   }
 
   @Get(':id')

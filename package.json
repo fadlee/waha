@@ -59,6 +59,7 @@
     "joi": "^17.13.3",
     "knex": "^3.1.0",
     "libphonenumber-js": "^1.10.36",
+    "libsignal": "github:devlikeapro/libsignal-node#fork-master",
     "link-preview-js": "^3.0.4",
     "lodash": "^4.17.21",
     "mime-types": "^2.1.27",
@@ -70,15 +71,26 @@
     "pino-pretty": "^11.2.1",
     "pretty-bytes": "5.6.0",
     "promise-retry": "^2.0.1",
-    "puppeteer": "^21.0.0",
+    "puppeteer": "^23.6.0",
     "qrcode": "^1.5.1",
     "qrcode-terminal": "^0.12.0",
     "reflect-metadata": "^0.1.13",
     "rimraf": "^3.0.2",
-    "rxjs": "^7.1.0",
+    "rxjs": "^7.8.1",
     "sharp": "^0.33.4",
     "swagger-ui-express": "^4.1.4",
+    "ulid": "^2.3.0",
     "whatsapp-web.js": "github:devlikeapro/whatsapp-web.js#fork-main-channels"
+  },
+  "optionalDependencies": {
+    "bufferutil": "^4.0.8"
+  },
+  "resolutions": {
+    "bufferutil": "^4.0.8",
+    "ws": "^8.18.0",
+    "puppeteer": "^23.6.0",
+    "whatwg-url": "13.0.0",
+    "libsignal": "github:devlikeapro/libsignal-node#fork-master"
   },
   "devDependencies": {
     "@nestjs/cli": "^9.0.0",

@@ -82,7 +82,7 @@ export class ChannelsController {
     }
   }
 
-  @Post('follow')
+  @Post(':id/follow')
   @SessionApiParam
   @NewsletterIdApiParam
   @ApiOperation({ summary: 'Follow the channel.' })
@@ -93,7 +93,7 @@ export class ChannelsController {
     return session.channelsFollowChannel(id);
   }
 
-  @Post('unfollow')
+  @Post(':id/unfollow')
   @SessionApiParam
   @NewsletterIdApiParam
   @ApiOperation({ summary: 'Unfollow the channel.' })
@@ -104,7 +104,7 @@ export class ChannelsController {
     return session.channelsUnfollowChannel(id);
   }
 
-  @Post('mute')
+  @Post(':id/mute')
   @SessionApiParam
   @NewsletterIdApiParam
   @ApiOperation({ summary: 'Mute the channel.' })
@@ -115,7 +115,7 @@ export class ChannelsController {
     return session.channelsMuteChannel(id);
   }
 
-  @Post('unmute')
+  @Post(':id/unmute')
   @SessionApiParam
   @NewsletterIdApiParam
   @ApiOperation({ summary: 'Unmute the channel.' })

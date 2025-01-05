@@ -4,9 +4,14 @@ import {
   ApiProperty,
   getSchemaPath,
 } from '@nestjs/swagger';
-import { IsNumber, IsString } from 'class-validator';
+import { GetChatMessagesQuery } from '@waha/structures/chats.dto';
+import { IsNotEmpty, IsNumber, IsString } from 'class-validator';
 
-import { SessionBaseRequest, SessionQuery } from './base.dto';
+import {
+  SessionBaseRequest,
+  SessionQuery,
+  WHATSAPP_DEFAULT_SESSION_NAME,
+} from './base.dto';
 import {
   BinaryFile,
   RemoteFile,
@@ -42,16 +47,14 @@ export class ChatQuery extends SessionQuery {
   chatId: string;
 }
 
-export class GetMessageQuery extends ChatQuery {
-  @IsNumber()
-  limit: number;
+export class GetMessageQuery extends GetChatMessagesQuery {
+  @IsNotEmpty()
+  @IsString()
+  session: string = WHATSAPP_DEFAULT_SESSION_NAME;
 
-  @ApiProperty({
-    example: true,
-    required: false,
-    description: 'Download media for messages',
-  })
-  downloadMedia: true;
+  @ChatIdProperty()
+  @IsString()
+  chatId: string;
 }
 
 export class GetPresenceQuery extends ChatQuery {}
@@ -153,6 +156,8 @@ export class MessageTextRequest extends ChatRequest {
 
   @ReplyToProperty()
   reply_to?: string;
+
+  linkPreview?: boolean = true;
 }
 
 export class EditMessageRequest {
@@ -243,11 +248,24 @@ export class MessageVideoRequest extends ChatRequest {
     example: null,
   })
   reply_to?: string;
+
+  @ApiProperty({
+    description: 'Send as video note (aka instant or round video).',
+    example: false,
+  })
+  asNote?: boolean;
 }
 
 export class MessageLinkPreviewRequest extends ChatRequest {
   url: string;
   title: string;
+}
+
+export class MessageForwardRequest extends ChatRequest {
+  @ApiProperty({
+    example: 'false_11111111111@c.us_AAAAAAAAAAAAAAAAAAAA',
+  })
+  messageId: string;
 }
 
 export class MessageReactionRequest extends MessageRequest {

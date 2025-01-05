@@ -1,5 +1,6 @@
 import { WAMessage } from '@adiwajshing/baileys';
 import { LabelAssociation } from '@adiwajshing/baileys/lib/Types/LabelAssociation';
+import { IGroupRepository } from '@waha/core/engines/noweb/store/IGroupRepository';
 import { ILabelAssociationRepository } from '@waha/core/engines/noweb/store/ILabelAssociationsRepository';
 import { ILabelsRepository } from '@waha/core/engines/noweb/store/ILabelsRepository';
 
@@ -15,6 +16,8 @@ export abstract class INowebStorage {
   abstract getContactsRepository(): IContactRepository;
 
   abstract getChatRepository(): IChatRepository;
+
+  abstract getGroupRepository(): IGroupRepository;
 
   abstract getMessagesRepository(): IMessagesRepository;
 

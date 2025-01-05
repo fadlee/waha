@@ -63,6 +63,7 @@ export class LocalStoreCore extends LocalStore {
       const engineDir = this.getEngineDirectory();
       const database = path.join(engineDir, 'waha.sqlite3');
       this.db = new Database(database);
+      this.db.pragma('journal_mode = WAL;');
     }
     return this.db;
   }

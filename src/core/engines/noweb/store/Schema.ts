@@ -19,6 +19,11 @@ export const NOWEB_STORE_SCHEMA = [
     ],
   ),
   new Schema(
+    'groups',
+    [new Field('id', 'TEXT'), new Field('data', 'TEXT')],
+    [new Index('groups_id_index', ['id'])],
+  ),
+  new Schema(
     'messages',
     [
       new Field('jid', 'TEXT'),

@@ -26,7 +26,7 @@ RUN yarn build && find ./dist -name "*.d.ts" -delete
 FROM node:${NODE_VERSION} AS dashboard
 
 # Download WAHA Dashboard
-ENV WAHA_DASHBOARD_SHA a3e3e31850af55161ca58cd8edb7dc9562707d14
+ENV WAHA_DASHBOARD_SHA fed4e50e88e4d26c610e3289fd0d8657cb866543
 RUN \
     wget https://github.com/devlikeapro/dashboard/archive/${WAHA_DASHBOARD_SHA}.zip \
     && unzip ${WAHA_DASHBOARD_SHA}.zip -d /tmp/dashboard \
@@ -44,19 +44,37 @@ ENV PUPPETEER_SKIP_DOWNLOAD=True
 # https://github.com/devlikeapro/waha/issues/347
 ENV NODE_OPTIONS="--max-old-space-size=16384"
 ARG USE_BROWSER=chromium
+ARG WHATSAPP_DEFAULT_ENGINE
 
 RUN echo "USE_BROWSER=$USE_BROWSER"
 
 # Install ffmpeg to generate previews for videos
 RUN apt-get update && apt-get install -y ffmpeg --no-install-recommends && rm -rf /var/lib/apt/lists/*
 
-# Install zip and unzip
-RUN apt-get update && apt-get install -y zip unzip --no-install-recommends && rm -rf /var/lib/apt/lists/*
+# Install zip and unzip - either for chromium or chrome
+RUN if [ "$USE_BROWSER" = "chromium" ] || [ "$USE_BROWSER" = "chrome" ]; then \
+    apt-get update  \
+    && apt-get install -y zip unzip \
+    && rm -rf /var/lib/apt/lists/*; \
+    fi
 
 # Install fonts if using either chromium or chrome
 RUN if [ "$USE_BROWSER" = "chromium" ] || [ "$USE_BROWSER" = "chrome" ]; then \
     apt-get update  \
-    && apt-get install -y fonts-ipafont-gothic fonts-wqy-zenhei fonts-thai-tlwg fonts-kacst fonts-freefont-ttf \
+    && apt-get install -y \
+        fontconfig \
+        fonts-freefont-ttf \
+        fonts-gfs-neohellenic \
+        fonts-indic \
+        fonts-ipafont-gothic \
+        fonts-kacst \
+        fonts-liberation \
+        fonts-noto-cjk \
+        fonts-noto-color-emoji \
+        fonts-roboto \
+        fonts-thai-tlwg \
+        fonts-wqy-zenhei \
+        fonts-open-sans \
       --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*; \
     fi
@@ -73,7 +91,7 @@ RUN if [ "$USE_BROWSER" = "chromium" ]; then \
 # Install Chrome
 # Available versions:
 # https://www.ubuntuupdates.org/package/google_chrome/stable/main/base/google-chrome-stable
-ARG CHROME_VERSION="126.0.6478.182-1"
+ARG CHROME_VERSION="130.0.6723.69-1"
 RUN if [ "$USE_BROWSER" = "chrome" ]; then \
         wget --no-verbose -O /tmp/chrome.deb https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_${CHROME_VERSION}_amd64.deb \
           && apt-get update \
@@ -81,6 +99,9 @@ RUN if [ "$USE_BROWSER" = "chrome" ]; then \
           && rm /tmp/chrome.deb \
           && rm -rf /var/lib/apt/lists/*; \
     fi
+
+# Set the ENV for NOWEB docker image
+ENV WHATSAPP_DEFAULT_ENGINE=$WHATSAPP_DEFAULT_ENGINE
 
 # Attach sources, install packages
 WORKDIR /app

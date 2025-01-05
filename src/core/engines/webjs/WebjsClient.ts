@@ -1,38 +1,200 @@
-import { Client } from 'whatsapp-web.js';
+import { GetChatMessagesFilter } from '@waha/structures/chats.dto';
+import { Label } from '@waha/structures/labels.dto';
+import { PaginationParams } from '@waha/structures/pagination.dto';
+import { TextStatus } from '@waha/structures/status.dto';
+import * as lodash from 'lodash';
+import { Client, Events } from 'whatsapp-web.js';
+import { Message } from 'whatsapp-web.js/src/structures';
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
-const { LoadUtils } = require('./WahaInjected');
+const { LoadWAHA } = require('./_WAHA.js');
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { LoadLodash } = require('./_lodash.js');
+
+// eslint-disable-next-line @typescript-eslint/no-var-requires
+const { LoadPaginator } = require('./_Paginator.js');
 
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const ChatFactory = require('whatsapp-web.js/src/factories/ChatFactory');
 
 export class WebjsClient extends Client {
-  async inject() {
-    // Even tho this.inject is not defined as interface in Client.ts
-    // We can still call and override it
-    // @ts-ignore
-    await super.inject();
-    //Load util functions (serializers, helper functions)
-    await this.pupPage.evaluate(LoadUtils);
+  constructor(options) {
+    super(options);
+    // Wait until it's READY and inject more utils
+    this.on(Events.READY, async () => {
+      await this.pupPage.evaluate(LoadLodash);
+      await this.pupPage.evaluate(LoadPaginator);
+      await this.pupPage.evaluate(LoadWAHA);
+    });
   }
 
-  async getChats(limit?: number, offset?: number) {
-    if (limit == null && offset == null) {
+  async unpair() {
+    await this.pupPage.evaluate(async () => {
+      if (
+        // @ts-ignore
+        window.Store &&
+        // @ts-ignore
+        window.Store.AppState &&
+        // @ts-ignore
+        typeof window.Store.AppState.logout === 'function'
+      ) {
+        // @ts-ignore
+        await window.Store.AppState.logout();
+      }
+    });
+  }
+
+  async createLabel(name: string, color: number): Promise<number> {
+    const labelId: number = await this.pupPage.evaluate(
+      async (name, color) => {
+        // @ts-ignore
+        return await window.WAHA.WAWebBizLabelEditingAction.labelAddAction(
+          name,
+          color,
+        );
+      },
+      name,
+      color,
+    );
+    return labelId;
+  }
+
+  async deleteLabel(label: Label) {
+    return await this.pupPage.evaluate(async (label) => {
+      // @ts-ignore
+      return await window.WAHA.WAWebBizLabelEditingAction.labelDeleteAction(
+        label.id,
+        label.name,
+        label.color,
+      );
+    }, label);
+  }
+
+  async updateLabel(label: Label) {
+    return await this.pupPage.evaluate(async (label) => {
+      // @ts-ignore
+      return await window.WAHA.WAWebBizLabelEditingAction.labelEditAction(
+        label.id,
+        label.name,
+        undefined, // predefinedId
+        label.color,
+      );
+    }, label);
+  }
+
+  async getChats(pagination?: PaginationParams) {
+    if (lodash.isEmpty(pagination)) {
       return await super.getChats();
     }
-    return await this.getChats2(limit, offset);
-  }
 
-  private async getChats2(limit?: number, offset?: number) {
-    const chats = await this.pupPage.evaluate(
-      async (limit, offset) => {
-        // @ts-ignore
-        return await window.WAHA.getChats(limit, offset);
-      },
-      limit,
-      offset,
-    );
+    // Get paginated chats
+    pagination.limit ||= Infinity;
+    pagination.offset ||= 0;
+
+    const chats = await this.pupPage.evaluate(async (pagination) => {
+      // @ts-ignore
+      return await window.WAHA.getChats(pagination);
+    }, pagination);
 
     return chats.map((chat) => ChatFactory.create(this, chat));
+  }
+
+  async sendTextStatus(status: TextStatus) {
+    // Convert from hex to number
+    const waColor = 'FF' + status.backgroundColor.replace('#', '');
+    const color = parseInt(waColor, 16);
+
+    const textStatus = {
+      text: status.text,
+      color: color,
+      font: status.font,
+    };
+    const sentMsg = await this.pupPage.evaluate(async (status) => {
+      // @ts-ignore
+      await window.Store.SendStatus.sendStatusTextMsgAction(status);
+      // @ts-ignore
+      const meUser = window.Store.User.getMeUser();
+      // @ts-ignore
+      const myStatus = window.Store.Status.getModelsArray().findLast(
+        (x) => x.id == meUser,
+      );
+      if (!myStatus) {
+        return undefined;
+      }
+      // @ts-ignore
+      const msg = myStatus.msgs.last();
+      // @ts-ignore
+      return msg ? window.WWebJS.getMessageModel(msg) : undefined;
+    }, textStatus);
+
+    return sentMsg ? new Message(this, sentMsg) : undefined;
+  }
+
+  async getMessages(
+    chatId: string,
+    filter: GetChatMessagesFilter,
+    pagination: PaginationParams,
+  ) {
+    const messages = await this.pupPage.evaluate(
+      async (chatId, filter, pagination) => {
+        pagination.limit ||= Infinity;
+        pagination.offset ||= 0;
+
+        const msgFilter = (m) => {
+          if (m.isNotification) {
+            return false;
+          }
+          if (
+            filter['filter.fromMe'] != null &&
+            m.id.fromMe !== filter['filter.fromMe']
+          ) {
+            return false;
+          }
+          if (
+            filter['filter.timestamp.gte'] != null &&
+            m.t < filter['filter.timestamp.gte']
+          ) {
+            return false;
+          }
+          if (
+            filter['filter.timestamp.lte'] != null &&
+            m.t > filter['filter.timestamp.lte']
+          ) {
+            return false;
+          }
+          return true;
+        };
+
+        // @ts-ignore
+        const chat = await window.WWebJS.getChat(chatId, { getAsModel: false });
+        let msgs = chat.msgs.getModelsArray().filter(msgFilter);
+
+        while (msgs.length < pagination.limit + pagination.offset) {
+          const loadedMessages =
+            // @ts-ignore
+            await window.Store.ConversationMsgs.loadEarlierMsgs(chat);
+          if (!loadedMessages || !loadedMessages.length) break;
+          msgs = [...loadedMessages.filter(msgFilter), ...msgs];
+        }
+
+        if (msgs.length > pagination.limit + pagination.offset) {
+          // sort by t - new first
+          msgs = msgs.sort((a, b) => b.t - a.t);
+          msgs = msgs.slice(
+            pagination.offset,
+            pagination.limit + pagination.offset,
+          );
+        }
+
+        // @ts-ignore
+        return msgs.map((m) => window.WWebJS.getMessageModel(m));
+      },
+      chatId,
+      filter,
+      pagination,
+    );
+
+    return messages.map((m) => new Message(this, m));
   }
 }

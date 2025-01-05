@@ -5,7 +5,7 @@ build-chrome:
 	docker build . -t devlikeapro/waha-plus:chrome --build-arg USE_BROWSER=chrome
 
 build-noweb:
-	docker build . -t devlikeapro/waha:noweb --build-arg USE_BROWSER=none
+	docker build . -t devlikeapro/waha:noweb --build-arg USE_BROWSER=none --build-arg WHATSAPP_DEFAULT_ENGINE=NOWEB
 
 build-all: build build-chrome build-noweb
 
@@ -33,6 +33,9 @@ for-swagger:
 
 up-noweb:
 	. ${NVM_DIR}/nvm.sh && nvm exec yarn up @adiwajshing/baileys@github:devlikeapro/Baileys#fork-master-channels-678
+
+up-noweb-libsignal:
+	. ${NVM_DIR}/nvm.sh && nvm exec yarn up libsignal@github:devlikeapro/libsignal-node#fork-master
 
 up-webjs:
 	. ${NVM_DIR}/nvm.sh && nvm exec yarn up whatsapp-web.js@github:devlikeapro/whatsapp-web.js#fork-main-channels

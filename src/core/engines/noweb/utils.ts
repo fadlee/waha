@@ -78,6 +78,14 @@ const isObjectALong = (value: any): value is Long => {
   );
 };
 
+export function ensureNumber(value: number | Long): number {
+  if (!value) {
+    // @ts-ignore
+    return value;
+  }
+  return typeof value === 'number' ? value : toNumber(value);
+}
+
 const toNumber = (longValue: Long): number => {
   const { low, high, unsigned } = longValue;
   const result = unsigned ? low >>> 0 : low + high * 0x100000000;
